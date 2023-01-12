@@ -82,7 +82,7 @@ class Client extends EventEmitter {
     /**
      * Sets up events and requirements, kicks off authentication request
      */
-    async initialize() {
+    async initialize(proxyUserName, proxyPassword) {
         let [browser, page] = [null, null];
 
         await this.authStrategy.beforeBrowserInitialized();
@@ -99,6 +99,11 @@ class Client extends EventEmitter {
 
             browser = await puppeteer.launch({...puppeteerOpts, args: browserArgs});
             page = (await browser.pages())[0];
+        }
+
+        if(proxyUserName && proxyPassword) {
+            await page.authenticate({username: proxyUserName, password: proxyPassword });
+            //await page.authenticate({username: 'geonode_I826RpMbtn-country-BR', password: '996fb535-42ac-4894-98ac-f8f077a53371', });
         }
       
         await page.setUserAgent(this.options.userAgent);
