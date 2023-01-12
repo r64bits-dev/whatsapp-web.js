@@ -102,8 +102,7 @@ class Client extends EventEmitter {
         }
 
         if(proxyUserName && proxyPassword) {
-            await page.authenticate({username: proxyUserName, password: proxyPassword });
-            //await page.authenticate({username: 'geonode_I826RpMbtn-country-BR', password: '996fb535-42ac-4894-98ac-f8f077a53371', });
+            await page.authenticate({username: proxyUserName, password: proxyPassword});
         }
       
         await page.setUserAgent(this.options.userAgent);
