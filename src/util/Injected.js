@@ -59,7 +59,7 @@ exports.ExposeStore = (moduleRaidStr) => {
         ...window.mR.findModule('toWebpSticker')[0],
         ...window.mR.findModule('addWebpMetadata')[0]
     };
-  
+
     window.Store.GroupUtils = {
         ...window.mR.findModule('sendCreateGroup')[0],
         ...window.mR.findModule('sendSetGroupSubject')[0],
@@ -75,18 +75,242 @@ exports.ExposeStore = (moduleRaidStr) => {
         };
     }
 
-    // TODO remove these once everybody has been updated to WWebJS with legacy sessions removed
-    const _linkPreview = window.mR.findModule('queryLinkPreview');
-    if (_linkPreview && _linkPreview[0] && _linkPreview[0].default) {
-        window.Store.Wap = _linkPreview[0].default;
-    }
+    // The following was implemented and inspired from wppconnect/wa-js at 
+    // https://github.com/wppconnect-team/wa-js/tree/main/src/chat/functions/prepareMessageButtons.ts
 
-    const _isMDBackend = window.mR.findModule('isMDBackend');
-    if(_isMDBackend && _isMDBackend[0] && _isMDBackend[0].isMDBackend) {
-        window.Store.MDBackend = _isMDBackend[0].isMDBackend();
-    } else {
-        window.Store.MDBackend = true;
-    }
+    // Find proxy modules
+    window.findProxyModel = (name) => {
+        const baseName = name.replace(/Model$/, '');
+
+        const names = [baseName];
+
+        // ChatModel => "chat"
+        names.push(baseName.replace(/^(\w)/, (l) => l.toLowerCase()));
+
+        // CartItemModel => "cart-item"
+        // ProductListModel => "product_list"
+        const parts = baseName.split(/(?=[A-Z])/);
+
+        names.push(parts.join('-').toLowerCase());
+        names.push(parts.join('_').toLowerCase());
+
+        const results = window.mR.findModule((m) =>
+            names.includes(
+                m.default?.prototype?.proxyName ||
+                m[name]?.prototype?.proxyName ||
+                m[baseName]?.prototype?.proxyName
+            )
+        )[0];
+
+        return results.default || results[name] || results[baseName];
+    };
+
+    // Function to modify functions.
+    window.injectToFunction = (selector, callback) => {
+        const oldFunct = window.mR.findModule(selector.name)[selector.index][selector.property];
+        window.mR.findModule(selector.name)[selector.index][selector.property] = (...args) => callback(oldFunct, args);
+    };
+
+    // Find button models
+    window.Store.TemplateButtonModel = window.findProxyModel('TemplateButtonModel');
+    window.Store.TemplateButtonCollection = window.mR.findModule('TemplateButtonCollection')[0].TemplateButtonCollection;
+
+    // Modify functions 
+    window.injectToFunction({
+        index: 0,
+        name: 'createMsgProtobuf',
+        property: 'createMsgProtobuf'
+    }, (func, args) => {
+        const [message] = args;
+        const proto = func(...args);
+        if (message.hydratedButtons) {
+            const hydratedTemplate = {
+                hydratedButtons: message.hydratedButtons,
+            };
+
+            if (message.footer) {
+                hydratedTemplate.hydratedFooterText = message.footer;
+            }
+
+            if (message.caption) {
+                hydratedTemplate.hydratedContentText = message.caption;
+            }
+
+            if (message.title) {
+                hydratedTemplate.hydratedTitleText = message.title;
+            }
+
+            if (proto.conversation) {
+                hydratedTemplate.hydratedContentText = proto.conversation;
+                delete proto.conversation;
+            } else if (proto.extendedTextMessage?.text) {
+                hydratedTemplate.hydratedContentText = proto.extendedTextMessage.text;
+                delete proto.extendedTextMessage;
+            } else {
+                // Search media part in message
+                let found;
+                const mediaPart = [
+                    'documentMessage',
+                    'imageMessage',
+                    'locationMessage',
+                    'videoMessage',
+                ];
+                for (const part of mediaPart) {
+                    if (part in proto) {
+                        found = part;
+                        break;
+                    }
+                }
+
+                if (!found) {
+                    return proto;
+                }
+
+                // Media message doesn't allow title
+                hydratedTemplate[found] = proto[found];
+
+                // Copy title to caption if not setted
+                if (
+                    hydratedTemplate.hydratedTitleText &&
+                    !hydratedTemplate.hydratedContentText
+                ) {
+                    hydratedTemplate.hydratedContentText =
+                        hydratedTemplate.hydratedTitleText;
+                }
+
+                // Remove title for media messages
+                delete hydratedTemplate.hydratedTitleText;
+
+                if (found === 'locationMessage') {
+                    if (
+                        !hydratedTemplate.hydratedContentText &&
+                        (message[found].name || message[found].address)
+                    ) {
+                        hydratedTemplate.hydratedContentText =
+                            message[found].name && message[found].address
+                                ? `${message[found].name}\n${message[found].address}`
+                                : message[found].name || message[found].address || '';
+                    }
+                }
+
+                // Ensure a content text;
+                hydratedTemplate.hydratedContentText =
+                    hydratedTemplate.hydratedContentText || ' ';
+
+                delete proto[found];
+            }
+
+            proto.templateMessage = {
+                hydratedTemplate,
+            };
+        }
+
+        return proto;
+    });
+
+    window.injectToFunction({
+        index: 0,
+        name: 'createMsgProtobuf',
+        property: 'createMsgProtobuf'
+    }, (func, args) => {
+        const proto = func(...args);
+        if (proto.templateMessage) {
+            proto.viewOnceMessage = {
+                message: {
+                    templateMessage: proto.templateMessage,
+                },
+            };
+            delete proto.templateMessage;
+        }
+        if (proto.listMessage) {
+            proto.viewOnceMessage = {
+                message: {
+                    listMessage: proto.listMessage,
+                },
+            };
+            delete proto.listMessage;
+        }
+        return proto;
+    });
+
+    window.injectToFunction({
+        index: 0,
+        name: 'typeAttributeFromProtobuf',
+        property: 'typeAttributeFromProtobuf'
+    }, (func, args) => {
+        const [proto] = args;
+        if (proto.templateMessage?.hydratedTemplate) {
+            const keys = Object.keys(proto.templateMessage?.hydratedTemplate);
+            const messagePart = [
+                'documentMessage',
+                'imageMessage',
+                'locationMessage',
+                'videoMessage',
+            ];
+            if (messagePart.some((part) => keys.includes(part))) {
+                return 'media';
+            }
+            return 'text';
+        }
+        return func(...args);
+    });
+
+    window.injectToFunction({
+        index: 0,
+        name: 'typeAttributeFromProtobuf',
+        property: 'typeAttributeFromProtobuf'
+    }, (func, args) => {
+        const [proto] = args;
+
+        if (proto.ephemeralMessage) {
+            const { message } = proto.ephemeralMessage;
+            return message ? func(message) : 'text';
+        }
+        if (proto.deviceSentMessage) {
+            const { message } = proto.deviceSentMessage;
+            return message ? func(message) : 'text';
+        }
+        if (proto.viewOnceMessage) {
+            const { message } = proto.viewOnceMessage;
+            return message ? func(message) : 'text';
+        }
+
+        return func(...args);
+    });
+
+    window.injectToFunction({
+        index: 0,
+        name: 'mediaTypeFromProtobuf',
+        property: 'mediaTypeFromProtobuf'
+    }, (func, args) => {
+        const [proto] = args;
+        if (proto.templateMessage?.hydratedTemplate) {
+            return func(proto.templateMessage.hydratedTemplate);
+        }
+        return func(...args);
+    });
+
+    window.injectToFunction({
+        index: 0,
+        name: 'mediaTypeFromProtobuf',
+        property: 'mediaTypeFromProtobuf'
+    }, (func, args) => {
+        const [proto] = args;
+        if (proto.deviceSentMessage) {
+            const { message } = proto.deviceSentMessage;
+            return message ? func(message) : null;
+        }
+        if (proto.ephemeralMessage) {
+            const { message } = proto.ephemeralMessage;
+            return message ? func(message) : null;
+        }
+        if (proto.viewOnceMessage) {
+            const { message } = proto.viewOnceMessage;
+            return message ? func(message) : null;
+        }
+
+        return func(...args);
+    });
 };
 
 exports.LoadUtils = () => {
@@ -100,6 +324,49 @@ exports.LoadUtils = () => {
         }
         return false;
 
+    };
+
+    window.WWebJS.prepareMessageButtons = (buttonsOptions) => {
+        const returnObject = {};
+
+        if (!buttonsOptions.buttons) {
+            return returnObject;
+        }
+
+        returnObject.title = buttonsOptions.title;
+        returnObject.footer = buttonsOptions.footer;
+        returnObject.isFromTemplate = true;
+        returnObject.buttons = new window.Store.TemplateButtonCollection;
+
+        returnObject.hydratedButtons = buttonsOptions.buttons;
+
+        returnObject.buttons.add(returnObject.hydratedButtons.map((button, index) => {
+            const buttonIndex = button.index ? button.index : index;
+            if (button.urlButton) {
+                return new window.Store.TemplateButtonModel({
+                    id: buttonIndex,
+                    displayText: button.urlButton?.displayText || '',
+                    url: button.urlButton?.url,
+                    subtype: 'url'
+                });
+            } else if (button.callButton) {
+                return new window.Store.TemplateButtonModel({
+                    id: buttonIndex,
+                    displayText: button.callButton?.displayText,
+                    phoneNumber: button.callButton?.phoneNumber,
+                    subtype: 'call'
+                });
+            } else {
+                return new window.Store.TemplateButtonModel({
+                    id: buttonIndex,
+                    displayText: button.quickReplyButton?.displayText,
+                    selectionId: button.quickReplyButton?.id,
+                    subtype: 'quick_reply'
+                });
+            }
+        }));
+
+        return returnObject;
     };
 
     window.WWebJS.sendMessage = async (chat, content, options = {}) => {
@@ -185,7 +452,7 @@ exports.LoadUtils = () => {
             delete options.linkPreview;
 
             // Not supported yet by WhatsApp Web on MD
-            if(!window.Store.MDBackend) {
+            if (!window.Store.MDBackend) {
                 const link = window.Store.Validators.findLink(content);
                 if (link) {
                     const preview = await window.Store.Wap.queryLinkPreview(link.url);
@@ -195,9 +462,9 @@ exports.LoadUtils = () => {
                 }
             }
         }
-        
+
         let buttonOptions = {};
-        if(options.buttons){
+        if (options.buttons) {
             let caption;
             if (options.buttons.type === 'chat') {
                 content = options.buttons.body;
@@ -205,22 +472,18 @@ exports.LoadUtils = () => {
             } else {
                 caption = options.caption ? options.caption : ' '; //Caption can't be empty
             }
+
+            buttonOptions = window.WWebJS.prepareMessageButtons(options.buttons);
             buttonOptions = {
-                productHeaderImageRejected: false,
-                isFromTemplate: false,
-                isDynamicReplyButtonsMsg: true,
-                title: options.buttons.title ? options.buttons.title : undefined,
-                footer: options.buttons.footer ? options.buttons.footer : undefined,
-                dynamicReplyButtons: options.buttons.buttons,
-                replyButtons: options.buttons.buttons,
+                ...buttonOptions,
                 caption: caption
             };
             delete options.buttons;
         }
 
         let listOptions = {};
-        if(options.list){
-            if(window.Store.Conn.platform === 'smba' || window.Store.Conn.platform === 'smbi'){
+        if (options.list) {
+            if (window.Store.Conn.platform === 'smba' || window.Store.Conn.platform === 'smbi') {
                 throw '[LT01] Whatsapp business can\'t send this yet';
             }
             listOptions = {
